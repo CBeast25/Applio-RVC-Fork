@@ -1,9 +1,11 @@
 import torch
 from torch.cuda.amp import GradScaler, autocast
 
+from lib.infer.infer_libs.train import utils
+
 from lib.infer.infer_libs.train.mel_processing import mel_spectrogram_torch, spec_to_mel_torch
 
-import lib.infer.infer_libs.infer_pack.commons as commons
+from lib.infer.infer_libs.infer_pack import commons
 
 from lib.infer.infer_libs.train.losses import (
     discriminator_loss,
@@ -106,6 +108,7 @@ class CustomDataModule(L.LightningDataModule):
             batch_sampler=self.train_sampler,
             persistent_workers=True,
             prefetch_factor=8,
+            batch_size=hps.train.batch_size
         )
 
 class GAN(L.LightningModule):
