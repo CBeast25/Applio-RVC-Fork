@@ -1,0 +1,10 @@
+ffmpeg.exe
+ffprobe.exe
+
+runtime
+torchcrepe
+datasets/*
+logs/*
+
+assets/rmvpe/rmvpe.pt
+assets/hubert/hubert_base.pt
