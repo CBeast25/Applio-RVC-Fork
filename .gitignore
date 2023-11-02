@@ -8,3 +8,4 @@ logs/*
 
 assets/rmvpe/rmvpe.pt
 assets/hubert/hubert_base.pt
+assets/rmvpe/rmvpe.onnx

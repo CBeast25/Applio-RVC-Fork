@@ -1,18 +1,49 @@
-import torch
-from torch.cuda.amp import GradScaler, autocast
+import os
+import sys
+import logging
+
+logger = logging.getLogger(__name__)
+
+now_dir = os.getcwd()
+sys.path.append(os.path.join(now_dir))
+
+import datetime
 
 from lib.infer.infer_libs.train import utils
 
-from lib.infer.infer_libs.train.mel_processing import mel_spectrogram_torch, spec_to_mel_torch
+hps = utils.get_hparams()
+os.environ["CUDA_VISIBLE_DEVICES"] = hps.gpus.replace("-", ",")
+n_gpus = len(hps.gpus.split("-"))
+from random import randint, shuffle
+
+import torch
+try:
+    import intel_extension_for_pytorch as ipex # pylint: disable=import-error, unused-import
+    if torch.xpu.is_available():
+        from lib.infer.modules.ipex import ipex_init
+        from lib.infer.modules.ipex.gradscaler import gradscaler_init
+        from torch.xpu.amp import autocast
+        GradScaler = gradscaler_init()
+        ipex_init()
+    else:
+        from torch.cuda.amp import GradScaler, autocast
+except Exception:
+    from torch.cuda.amp import GradScaler, autocast
+
+torch.backends.cudnn.deterministic = False
+torch.backends.cudnn.benchmark = False
+from time import sleep
+from time import time as ttime
+
+import torch.distributed as dist
+import torch.multiprocessing as mp
+
+from torch.nn import functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 from lib.infer.infer_libs.infer_pack import commons
-
-from lib.infer.infer_libs.train.losses import (
-    discriminator_loss,
-    feature_loss,
-    generator_loss,
-    kl_loss,
-)
 from lib.infer.infer_libs.train.data_utils import (
     DistributedBucketSampler,
     TextAudioCollate,
@@ -20,9 +51,6 @@ from lib.infer.infer_libs.train.data_utils import (
     TextAudioLoader,
     TextAudioLoaderMultiNSFsid,
 )
-import lib.infer.infer_libs.train.utils as utils
-hps = utils.get_hparams()
-n_gpus = len(hps.gpus.split("-"))
 
 if hps.version == "v1":
     from lib.infer.infer_libs.infer_pack.models import MultiPeriodDiscriminator
@@ -37,6 +65,14 @@ else:
         MultiPeriodDiscriminatorV2 as MultiPeriodDiscriminator,
     )
 
+from lib.infer.infer_libs.train.losses import (
+    discriminator_loss,
+    feature_loss,
+    generator_loss,
+    kl_loss,
+)
+from lib.infer.infer_libs.train.mel_processing import mel_spectrogram_torch, spec_to_mel_torch
+from lib.infer.infer_libs.train.process_ckpt import savee
 import os
 import lightning as L
 import torch
@@ -76,6 +112,8 @@ class FineTuneLearningRateFinder(LearningRateFinder):
 class CustomDataModule(L.LightningDataModule):
     def __init__(self):
         super().__init__()
+        dist.init_process_group(backend="gloo", init_method="env://", world_size=n_gpus, rank=0)
+        self.batch_size=hps.train.batch_size
         
     def prepare_data(self):
         if hps.if_f0 == 1:
@@ -83,7 +121,7 @@ class CustomDataModule(L.LightningDataModule):
         else:
             self.train_dataset = TextAudioLoader(hps.data.training_files, hps.data)
 
-    def setup(self):
+    def setup(self, stage=None):
         self.train_sampler = DistributedBucketSampler(
             self.train_dataset,
             hps.train.batch_size * n_gpus,
@@ -108,7 +146,6 @@ class CustomDataModule(L.LightningDataModule):
             batch_sampler=self.train_sampler,
             persistent_workers=True,
             prefetch_factor=8,
-            batch_size=hps.train.batch_size
         )
 
 class GAN(L.LightningModule):
@@ -116,7 +153,7 @@ class GAN(L.LightningModule):
         super().__init__()
         self.save_hyperparameters()
         self.automatic_optimization = False
-
+        self.batch_size=hps.train.batch_size
         if hps.if_f0 == 1:
             self.generator = RVC_Model_f0(
                 hps.data.filter_length // 2 + 1,
@@ -242,7 +279,7 @@ class GAN(L.LightningModule):
         scaler.update()
 
         lr = optim_g.param_groups[0]["lr"]
-        self.log(self.current_epoch, prog_bar=True)
+        self.log("epoch", self.current_epoch, prog_bar=True)
         # Amor For Tensorboard display
         if loss_mel > 75:
             loss_mel = 75
@@ -318,7 +355,9 @@ class GAN(L.LightningModule):
         return [optim_g, optim_d], [scheduler_g, scheduler_d]
     
 if __name__ == "__main__":
-    logger = TensorBoardLogger("train.log", hps.model_dir)
+    logger = TensorBoardLogger(hps.model_dir)
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = str(randint(20000, 55555))
     checkpoint_callback = ModelCheckpoint(
         save_top_k=3,
         monitor="loss/g/total",
