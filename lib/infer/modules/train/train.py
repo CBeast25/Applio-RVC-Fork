@@ -154,6 +154,7 @@ class GAN(L.LightningModule):
         self.save_hyperparameters()
         self.automatic_optimization = False
         self.batch_size=hps.train.batch_size
+        self.lr = hps.train.learning_rate
         if hps.if_f0 == 1:
             self.generator = RVC_Model_f0(
                 hps.data.filter_length // 2 + 1,
@@ -335,13 +336,13 @@ class GAN(L.LightningModule):
     def configure_optimizers(self):
         optim_g = torch.optim.AdamW(
             self.generator.parameters(),
-            hps.train.learning_rate,
+            self.lr,
             betas=hps.train.betas,
             eps=hps.train.eps,
         )
         optim_d = torch.optim.AdamW(
             self.discriminator.parameters(),
-            hps.train.learning_rate,
+            self.lr,
             betas=hps.train.betas,
             eps=hps.train.eps,
         )
@@ -356,6 +357,7 @@ class GAN(L.LightningModule):
     
 if __name__ == "__main__":
     logger = TensorBoardLogger(hps.model_dir)
+    logging.getLogger(logger.name).setLevel(logging.INFO)
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(randint(20000, 55555))
     checkpoint_callback = ModelCheckpoint(
